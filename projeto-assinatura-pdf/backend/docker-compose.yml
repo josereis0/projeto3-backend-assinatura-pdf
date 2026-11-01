@@ -1,0 +1,24 @@
+
+version: '3.8'
+services:
+  db:
+    image: postgres:15
+    environment:
+      POSTGRES_DB: assinatura_pdf
+      POSTGRES_USER: user
+      POSTGRES_PASSWORD: password
+    ports:
+      - "5432:5432"
+  backend:
+    build: ./backend
+    volumes:
+      - ./backend:/app
+    ports:
+      - "8000:8000"
+    depends_on:
+      - db
+  pdf-sandbox:
+    image: python:3.11-slim
+    # REQ-62 ambiente isolado sem acesso à rede
+    network_mode: none
+    command: python -m pdf_processor_isolated

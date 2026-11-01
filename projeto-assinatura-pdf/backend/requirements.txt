@@ -1,0 +1,15 @@
+
+fastapi
+uvicorn
+sqlalchemy
+psycopg2-binary
+python-dotenv
+argon2-cffi
+PyJWT
+cryptography
+pyotp
+qrcode[pil]
+reportlab
+PyPDF2
+python-multipart
+alembic
