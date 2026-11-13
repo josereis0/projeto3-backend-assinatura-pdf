@@ -1,0 +1,14 @@
+# Variáveis de ambiente e segredos (RNF-07)
+.env
+*.env
+!.env.example
+
+# Chaves privadas
+*.pem
+*.key
+
+# Ambiente virtual e cache Python
+venv/
+.venv/
+__pycache__/
+*.py[cod]

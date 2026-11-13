@@ -1,4 +1,3 @@
-
 version: '3.8'
 services:
   db:
@@ -10,9 +9,9 @@ services:
     ports:
       - "5432:5432"
   backend:
-    build: ./backend
+    build: ./
     volumes:
-      - ./backend:/app
+      - ./:/app
     ports:
       - "8000:8000"
     depends_on:

@@ -2,7 +2,7 @@
 from fastapi import APIRouter, Depends, Request, Response, HTTPException
 from sqlalchemy.orm import Session
 from ..database import get_db
-from ..models import User, RefreshToken, Denylist, Session as UserSession, AuditLog
+from ..models import User, RefreshToken, Denylist, Session as UserSession, AuditLog, BackupCode, TOTPFailedAttempt
 from ..security.argon2 import hash_password, verify_password
 from ..security.jwt_handler import create_access_token, verify_access_token
 from ..config import settings
@@ -33,8 +33,12 @@ def register(email: str, name: str, password: str, db: Session = Depends(get_db)
     key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
     priv_pem = key.private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8, serialization.NoEncryption()).decode()
     pub_pem = key.public_key().public_bytes(serialization.Encoding.PEM, serialization.PublicFormat.SubjectPublicKeyInfo).decode()
-    # criptografa privada com master key (simplificado)
-    user = User(email=email, name=sanitize_text(name), password_hash=hash_password(password), private_key_encrypted=priv_pem, public_key=pub_pem)
+    # criptografa privada com master key (REQ-45)
+    import base64
+    from cryptography.fernet import Fernet
+    mk = base64.urlsafe_b64encode(hashlib.sha256(settings.MASTER_KEY.encode()).digest())
+    priv_enc = Fernet(mk).encrypt(priv_pem.encode()).decode()
+    user = User(email=email, name=sanitize_text(name), password_hash=hash_password(password), private_key_encrypted=priv_enc, public_key=pub_pem)
     db.add(user)
     db.commit()
     return {"id": user.id, "email": user.email}
@@ -72,10 +76,20 @@ def login(email: str, password: str, totp_code: str = None, request: Request = N
     if user.totp_enabled:
         if not totp_code:
             return {"requires_totp": True, "message": "Informe código TOTP"}
-        from ..security.totp import decrypt_secret, verify_totp
+        from ..security.totp import decrypt_secret, verify_totp, hash_backup_code
         secret = decrypt_secret(user.totp_secret_encrypted)
-        if not verify_totp(secret, totp_code):
+        totp_ok = verify_totp(secret, totp_code)
+        if not totp_ok:
+            # Verifica se é um backup code válido (REQ-14)
+            bc_hash = hash_backup_code(totp_code.strip().upper())
+            bc = db.query(BackupCode).filter(BackupCode.user_id==user.id, BackupCode.code_hash==bc_hash, BackupCode.used==False).first()
+            if bc:
+                bc.used = True
+                db.commit()
+                totp_ok = True
+        if not totp_ok:
             # REQ-16 alerta códigos inválidos repetidos
+            db.add(TOTPFailedAttempt(user_id=user.id))
             db.add(AuditLog(user_id=user.id, ip=ip, user_agent=request.headers.get("user-agent",""), action="totp_invalido", result="falha"))
             db.commit()
             raise HTTPException(status_code=401, detail={"code":"AUTH_006","message":"TOTP inválido","timestamp": datetime.now(timezone.utc).isoformat()})
@@ -98,7 +112,7 @@ def login(email: str, password: str, totp_code: str = None, request: Request = N
     # REQ-20 cookie HttpOnly Secure SameSite=Strict
     response.set_cookie(key="refresh_token", value=refresh_raw.hex(), httponly=True, secure=True, samesite="strict", max_age=7*24*3600)
     response.set_cookie(key="csrf_token", value=secrets.token_urlsafe(32), httponly=False, secure=True, samesite="strict")
-    return {"access_token": access_token, "token_type":"bearer"}
+    return {"access_token": access_token, "token_type":"bearer", "user": {"id": user.id, "email": user.email, "name": user.name, "totp_enabled": bool(user.totp_enabled)}}
 
 @router.post("/logout")
 def logout(request: Request, response: Response, db: Session = Depends(get_db)):
@@ -152,3 +166,23 @@ def refresh(request: Request, response: Response, db: Session = Depends(get_db))
     db.commit()
     response.set_cookie(key="refresh_token", value=new_raw.hex(), httponly=True, secure=True, samesite="strict", max_age=7*24*3600)
     return {"access_token": access_token}
+
+@router.post("/change-password")
+def change_password(current_password: str, new_password: str, request: Request, db: Session = Depends(get_db)):
+    auth_header = request.headers.get("Authorization")
+    if not auth_header:
+        raise HTTPException(status_code=401, detail={"code":"AUTH_001","message":"Não autenticado","timestamp": datetime.now(timezone.utc).isoformat()})
+    payload = verify_access_token(auth_header.replace("Bearer ",""))
+    if not payload:
+        raise HTTPException(status_code=401, detail={"code":"AUTH_003","message":"Token inválido","timestamp": datetime.now(timezone.utc).isoformat()})
+    user = db.query(User).filter(User.id==payload.get("sub")).first()
+    if not user or not verify_password(user.password_hash, current_password):
+        raise HTTPException(status_code=401, detail={"code":"AUTH_001","message":"Senha atual incorreta","timestamp": datetime.now(timezone.utc).isoformat()})
+    validate_password_policy(new_password)
+    user.password_hash = hash_password(new_password)
+    user.password_changed_at = datetime.now(timezone.utc)
+    ip = request.client.host if request and request.client else "0.0.0.0"
+    ua = request.headers.get("user-agent","")
+    db.add(AuditLog(user_id=user.id, ip=ip, user_agent=ua, action="troca_senha", result="sucesso"))
+    db.commit()
+    return {"message": "Senha alterada com sucesso"}

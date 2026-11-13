@@ -1,4 +1,3 @@
-
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from datetime import datetime, timezone
@@ -10,6 +9,14 @@ from .routes import auth, pdf, verify, sessions, audit, passkeys, totp
 import time
 
 app = FastAPI(title="Assinatura Digital PDF API", version="1.0")
+
+from .database import engine
+try:
+    from .models import Base
+except ImportError:
+    from .database import Base
+
+Base.metadata.create_all(bind=engine)
 
 # RNF-16 prefixo /api/v1 já nas rotas
 

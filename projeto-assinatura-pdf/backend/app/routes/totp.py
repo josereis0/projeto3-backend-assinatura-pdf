@@ -26,11 +26,13 @@ def setup_begin(request: Request, db: Session = Depends(get_db)):
     img.save(buf, format="PNG")
     b64 = base64.b64encode(buf.getvalue()).decode()
     # REQ-14 backup codes
-    codes = [secrets.token_urlsafe(8) for _ in range(8)]
+    db.query(BackupCode).filter(BackupCode.user_id==user.id).delete()
+    codes = [secrets.token_hex(4).upper() for _ in range(8)]
     for c in codes:
         db.add(BackupCode(user_id=user.id, code_hash=hash_backup_code(c)))
     db.commit()
-    return {"qr_base64": b64, "uri": uri, "backup_codes": codes, "message":"Guarde os códigos REQ-14"}
+    b32_secret = base64.b32encode(secret_bytes).decode()
+    return {"qr_base64": b64, "uri": uri, "secret": b32_secret, "backup_codes": codes, "message":"Guarde os códigos REQ-14"}
 
 @router.post("/setup/confirm")
 def setup_confirm(code: str, request: Request, db: Session = Depends(get_db)):
@@ -44,3 +46,17 @@ def setup_confirm(code: str, request: Request, db: Session = Depends(get_db)):
         db.commit()
         return {"message":"2FA ativado REQ-11"}
     raise HTTPException(status_code=400, detail={"code":"AUTH_017","message":"Código inválido","timestamp": datetime.now(timezone.utc).isoformat()})
+
+@router.post("/disable")
+def disable_totp(request: Request, db: Session = Depends(get_db)):
+    auth = request.headers.get("Authorization")
+    payload = verify_access_token(auth.replace("Bearer ","")) if auth else None
+    if not payload:
+        raise HTTPException(status_code=401, detail={"code":"AUTH_003","message":"Token inválido","timestamp": datetime.now(timezone.utc).isoformat()})
+    user = db.query(User).filter(User.id==payload["sub"]).first()
+    if user:
+        user.totp_enabled = False
+        user.totp_secret_encrypted = None
+        db.query(BackupCode).filter(BackupCode.user_id==user.id).delete()
+        db.commit()
+    return {"message":"2FA desativado"}
